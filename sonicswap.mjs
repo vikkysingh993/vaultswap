@@ -7,6 +7,14 @@ const router = express.Router();
    CONFIG
 ================================ */
 
+
+const ERC20_ABI = [
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)"
+];
+
+
 const SONIC_RPC = "https://rpc.soniclabs.com";
 const CHAIN_ID = 146; // Sonic
 
@@ -30,6 +38,10 @@ const UNIVERSAL_ROUTER =
   "0x92643dc4f75c374b689774160cdea09a0704a9c2";
 
 const provider = new ethers.JsonRpcProvider(SONIC_RPC);
+
+
+
+
 
 
 /* =====================================================
@@ -97,11 +109,87 @@ router.get("/quote", async (req, res) => {
    🔹 CORE ODOS SWAP FUNCTION
 ===================================================== */
 
+
+
+
+// async function doSwap({ fromToken, toToken, amount, privateKey }) {
+//   const wallet = new ethers.Wallet(privateKey, provider);
+//   const userAddress = wallet.address;
+
+//   // 1️⃣ Quote
+//   const quoteRes = await fetch("https://api.odos.xyz/sor/quote/v2", {
+//     method: "POST",
+//     headers: { "Content-Type": "application/json" },
+//     body: JSON.stringify({
+//       chainId: CHAIN_ID,
+//       inputTokens: [{
+//         tokenAddress: TOKENS[fromToken].address,
+//         amount: ethers.parseUnits(
+//           amount,
+//           TOKENS[fromToken].decimals
+//         ).toString()
+//       }],
+//       outputTokens: [{
+//         tokenAddress: TOKENS[toToken].address,
+//         proportion: 1
+//       }],
+//       userAddr: userAddress,
+//       slippageLimitPercent: 1
+//     })
+//   });
+
+//   const quote = await quoteRes.json();
+//   if (!quote.pathId) throw new Error("Odos quote failed");
+
+//   const expectedOut = ethers.formatUnits(
+//     quote.outAmounts[0],
+//     TOKENS[toToken].decimals
+//   );
+
+//   // 2️⃣ Assemble
+//   const assembleRes = await fetch("https://api.odos.xyz/sor/assemble", {
+//     method: "POST",
+//     headers: { "Content-Type": "application/json" },
+//     body: JSON.stringify({
+//       userAddr: userAddress,
+//       pathId: quote.pathId
+//     })
+//   });
+
+//   const assembled = await assembleRes.json();
+//   if (!assembled.transaction) throw new Error("Assemble failed");
+
+//   // 3️⃣ Send TX
+//   const tx = await wallet.sendTransaction({
+//     to: assembled.transaction.to,
+//     data: assembled.transaction.data,
+//     value: assembled.transaction.value
+//   });
+
+//   // 4️⃣ Receipt check
+//   const receipt = await tx.wait();
+//   if (receipt.status !== 1) {
+//     throw new Error("Transaction reverted on-chain");
+//   }
+
+//   return {
+//     txHash: tx.hash,
+//     expectedOut
+//   };
+// }
+
+
 async function doSwap({ fromToken, toToken, amount, privateKey }) {
+
   const wallet = new ethers.Wallet(privateKey, provider);
   const userAddress = wallet.address;
 
-  // 1️⃣ Quote
+  const amountIn = ethers.parseUnits(
+    amount,
+    TOKENS[fromToken].decimals
+  );
+
+  // 1️⃣ QUOTE
   const quoteRes = await fetch("https://api.odos.xyz/sor/quote/v2", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -109,10 +197,7 @@ async function doSwap({ fromToken, toToken, amount, privateKey }) {
       chainId: CHAIN_ID,
       inputTokens: [{
         tokenAddress: TOKENS[fromToken].address,
-        amount: ethers.parseUnits(
-          amount,
-          TOKENS[fromToken].decimals
-        ).toString()
+        amount: amountIn.toString()
       }],
       outputTokens: [{
         tokenAddress: TOKENS[toToken].address,
@@ -126,12 +211,7 @@ async function doSwap({ fromToken, toToken, amount, privateKey }) {
   const quote = await quoteRes.json();
   if (!quote.pathId) throw new Error("Odos quote failed");
 
-  const expectedOut = ethers.formatUnits(
-    quote.outAmounts[0],
-    TOKENS[toToken].decimals
-  );
-
-  // 2️⃣ Assemble
+  // 2️⃣ ASSEMBLE
   const assembleRes = await fetch("https://api.odos.xyz/sor/assemble", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -144,14 +224,42 @@ async function doSwap({ fromToken, toToken, amount, privateKey }) {
   const assembled = await assembleRes.json();
   if (!assembled.transaction) throw new Error("Assemble failed");
 
-  // 3️⃣ Send TX
+  // 3️⃣ APPROVE (Only ERC20, not native SONIC)
+  if (TOKENS[fromToken].address !== ethers.ZeroAddress) {
+
+    const ERC20_ABI = [
+      "function approve(address spender, uint256 amount) external returns (bool)",
+      "function allowance(address owner, address spender) view returns (uint256)"
+    ];
+
+    const tokenContract = new ethers.Contract(
+      TOKENS[fromToken].address,
+      ERC20_ABI,
+      wallet
+    );
+
+    const allowance = await tokenContract.allowance(
+      userAddress,
+      assembled.transaction.to
+    );
+
+    if (allowance < amountIn) {
+      const approveTx = await tokenContract.approve(
+        assembled.transaction.to,
+        ethers.MaxUint256   // infinite approve (better)
+      );
+
+      await approveTx.wait();
+    }
+  }
+
+  // 4️⃣ SEND SWAP TX
   const tx = await wallet.sendTransaction({
     to: assembled.transaction.to,
     data: assembled.transaction.data,
     value: assembled.transaction.value
   });
 
-  // 4️⃣ Receipt check
   const receipt = await tx.wait();
   if (receipt.status !== 1) {
     throw new Error("Transaction reverted on-chain");
@@ -159,7 +267,10 @@ async function doSwap({ fromToken, toToken, amount, privateKey }) {
 
   return {
     txHash: tx.hash,
-    expectedOut
+    expectedOut: ethers.formatUnits(
+      quote.outAmounts[0],
+      TOKENS[toToken].decimals
+    )
   };
 }
 
